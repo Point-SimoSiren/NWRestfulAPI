@@ -1,0 +1,6 @@
+@NWRestfulAPI_HostAddress = http://localhost:5185
+
+GET {{NWRestfulAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
