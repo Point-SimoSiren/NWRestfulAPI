@@ -2,18 +2,22 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using NWRestfulAPI.Models;
 
 namespace NWRestfulAPI.Controllers
 {
-    [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
+    
     [Route("api/[controller]")]
     [ApiController]
     public class CustomersController : ControllerBase
     {
+        private readonly NorthwindOriginalContext db;
 
-        // Alustetaan tietokantayhteys
-        NorthwindOriginalContext db = new NorthwindOriginalContext();
+        public CustomersController(NorthwindOriginalContext context)
+        {
+            db = context;
+        }
 
 
         // Hakee kaikki asiakkaat
@@ -33,7 +37,7 @@ namespace NWRestfulAPI.Controllers
         [Route("{id}")]
         public ActionResult GetCustomers(string id)
         {
-            var customer = db.Customers.Find(id);
+            var customer = db.Customers.Include(c => c.Orders).FirstOrDefault(c => c.CustomerId == id);
             if (customer == null)
             {
                 return NoContent();

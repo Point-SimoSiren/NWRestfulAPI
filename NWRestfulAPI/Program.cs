@@ -2,24 +2,29 @@
 using NWRestfulAPI.Services.Interfaces;
 using NWRestfulAPI.Services;
 using System.Text;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers();
+builder.Services.AddControllers().AddJsonOptions(options =>
+{
+    options.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
+});
+
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 
-builder.Services.AddSwaggerGen(
-    c =>
-    {
+builder.Services.AddSwaggerGen(c => {
+
         c.SwaggerDoc("v1", new OpenApiInfo { Title = "NW Corporaatio", Version = "v1" });
 
-        // 🔑 Lisää JWT Bearer -autentikoinnin määrittely
+        // Lisää JWT Bearer -autentikoinnin määrittely
         c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
         {
             Description = "JWT Authorization header using the Bearer scheme. \r\n\r\n " +
@@ -31,7 +36,7 @@ builder.Services.AddSwaggerGen(
             Scheme = "Bearer"
         });
 
-        // 🔒 Lisää vaatimus kaikille (tai vain tietyille) endpointille
+        // Lisää vaatimus kaikille (tai vain tietyille) endpointille
         c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
@@ -50,9 +55,6 @@ builder.Services.AddSwaggerGen(
         }
     });
     });
-
-    
-    
 
 
 // ------------- Cors määritys ------------
@@ -95,6 +97,7 @@ builder.Services.AddAuthentication(au =>
 });
 
 builder.Services.AddScoped<IAuthenticateService, AuthenticateService>();
+builder.Services.AddDbContext<NorthwindOriginalContext>();
 
 //----------------------------jwt määritys päättyy-----------------------------------------
 
@@ -120,3 +123,5 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+public partial class Program { }
