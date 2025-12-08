@@ -1,33 +1,32 @@
+using System.Data.Common;
 using System.Net;
 using System.Net.Http.Json;
 using System.Linq;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Metadata.Conventions;
 using Microsoft.Extensions.DependencyInjection;
 using NWRestfulAPI.Models;
 
 namespace NWRestfulAPI.Tests;
 
-public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
+public class CustomersControllerTests
 {
-    private readonly CustomersApiFactory factory;
-    private readonly HttpClient client;
-
-    public CustomersControllerTests(CustomersApiFactory factory)
+    private static readonly WebApplicationFactoryClientOptions ClientOptions = new()
     {
-        this.factory = factory;
-        client = factory.CreateClient(new WebApplicationFactoryClientOptions
-        {
-            BaseAddress = new Uri("https://localhost"),
-            AllowAutoRedirect = false
-        });
-    }
+        BaseAddress = new Uri("https://localhost"),
+        AllowAutoRedirect = false
+    };
 
     [Fact]
     public async Task GetAllCustomers_ReturnsSeededCustomers()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var response = await client.GetAsync("/api/customers");
 
@@ -40,7 +39,9 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
     [Fact]
     public async Task GetCustomerOrders_ReturnsOrdersForExistingCustomer()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var response = await client.GetAsync("/api/customers/ALFKI");
 
@@ -54,7 +55,9 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
     [Fact]
     public async Task GetCustomerOrders_ReturnsNoContentWhenMissing()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var response = await client.GetAsync("/api/customers/MISSING");
 
@@ -64,7 +67,9 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
     [Fact]
     public async Task AddCustomer_CreatesNewCustomer()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var newCustomer = new Customer { CustomerId = "NEW01", CompanyName = "New Company" };
 
@@ -81,7 +86,9 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
     [Fact]
     public async Task AddCustomer_ReturnsBadRequestForDuplicateCompany()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var duplicate = new Customer { CustomerId = "DUP01", CompanyName = "Alfreds Futterkiste" };
 
@@ -93,7 +100,9 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
     [Fact]
     public async Task EditCustomer_UpdatesExistingCustomer()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var update = new Customer { CustomerId = "ALFKI", CompanyName = "Updated Name" };
 
@@ -109,7 +118,9 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
     [Fact]
     public async Task DeleteCustomer_RemovesCustomer()
     {
+        await using var factory = new CustomersApiFactory();
         await factory.ResetDatabaseAsync();
+        using var client = factory.CreateClient(ClientOptions);
 
         var response = await client.DeleteAsync("/api/customers/ANATR");
 
@@ -123,6 +134,11 @@ public class CustomersControllerTests : IClassFixture<CustomersApiFactory>
 
 public class CustomersApiFactory : WebApplicationFactory<Program>
 {
+    private SqliteConnection? connection;
+    private bool databaseInitialized;
+    private readonly object dbLock = new();
+    private static readonly Lazy<IModel> TestModel = new(BuildTestModel);
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
@@ -140,26 +156,44 @@ public class CustomersApiFactory : WebApplicationFactory<Program>
                 services.Remove(contextDescriptor);
             }
 
-            services.AddDbContext<NorthwindOriginalContext>(options =>
+            services.AddSingleton<DbConnection>(_ =>
             {
-                options.UseInMemoryDatabase("CustomersApiTests");
+                connection ??= new SqliteConnection("DataSource=:memory:");
+                connection.Open();
+                return connection;
             });
 
-            using var scope = services.BuildServiceProvider().CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<NorthwindOriginalContext>();
-            db.Database.EnsureCreated();
-            Seed(db);
+            services.AddScoped<NorthwindOriginalContext>(sp =>
+            {
+                var dbConnection = sp.GetRequiredService<DbConnection>();
+                var optionsBuilder = new DbContextOptionsBuilder<NorthwindOriginalContext>();
+                optionsBuilder.UseSqlite(dbConnection);
+                optionsBuilder.UseModel(TestModel.Value);
+                return new TestNorthwindContext(optionsBuilder.Options);
+            });
         });
     }
 
-    public async Task ResetDatabaseAsync()
+    public Task ResetDatabaseAsync()
     {
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<NorthwindOriginalContext>();
-        db.Customers.RemoveRange(db.Customers);
-        db.Orders.RemoveRange(db.Orders);
-        await db.SaveChangesAsync();
-        Seed(db);
+        if (db is not TestNorthwindContext)
+        {
+            throw new InvalidOperationException("TestNorthwindContext was not resolved.");
+        }
+        lock (dbLock)
+        {
+            if (!databaseInitialized)
+            {
+                db.Database.EnsureCreated();
+                databaseInitialized = true;
+            }
+
+            ClearData(db);
+            Seed(db);
+        }
+        return Task.CompletedTask;
     }
 
     private static void Seed(NorthwindOriginalContext db)
@@ -177,5 +211,71 @@ public class CustomersApiFactory : WebApplicationFactory<Program>
         db.Customers.AddRange(alfreds, ana);
         db.Orders.Add(order);
         db.SaveChanges();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing)
+        {
+            connection?.Dispose();
+        }
+    }
+
+    private static void ClearData(NorthwindOriginalContext db)
+    {
+        db.Orders.RemoveRange(db.Orders);
+        db.Customers.RemoveRange(db.Customers);
+        db.SaveChanges();
+    }
+
+    private class TestNorthwindContext : NorthwindOriginalContext
+    {
+        public TestNorthwindContext(DbContextOptions<NorthwindOriginalContext> options) : base(options)
+        {
+        }
+    }
+
+    private static IModel BuildTestModel()
+    {
+        var conventionOptions = new DbContextOptionsBuilder().UseSqlite("DataSource=:memory:").Options;
+        var conventions = ConventionSet.CreateConventionSet(new DbContext(conventionOptions));
+        var modelBuilder = new ModelBuilder(conventions);
+
+        modelBuilder.Entity<Customer>(entity =>
+        {
+            entity.ToTable("Customers");
+            entity.HasKey(e => e.CustomerId);
+            entity.Property(e => e.CustomerId).HasMaxLength(5);
+            entity.Property(e => e.CompanyName).IsRequired();
+            entity.Property(e => e.ContactName);
+            entity.Property(e => e.ContactTitle);
+            entity.Property(e => e.Address);
+            entity.Property(e => e.City);
+            entity.Property(e => e.Region);
+            entity.Property(e => e.PostalCode);
+            entity.Property(e => e.Country);
+            entity.Property(e => e.Phone);
+            entity.Property(e => e.Fax);
+            entity.Ignore(e => e.CustomerTypes);
+        });
+
+        modelBuilder.Entity<Order>(entity =>
+        {
+            entity.ToTable("Orders");
+            entity.HasKey(e => e.OrderId);
+            entity.Property(e => e.OrderId).ValueGeneratedNever();
+            entity.Property(e => e.CustomerId).HasMaxLength(5);
+            entity.Property(e => e.ShipName);
+            entity.Ignore(e => e.OrderDetails);
+            entity.Ignore(e => e.Employee);
+            entity.Ignore(e => e.ShipViaNavigation);
+            entity.HasOne(d => d.Customer)
+                .WithMany(p => p.Orders)
+                .HasForeignKey(d => d.CustomerId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        return (IModel)modelBuilder.Model;
     }
 }
